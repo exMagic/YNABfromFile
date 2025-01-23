@@ -1,0 +1,33 @@
+# Ignore macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS specific
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Ignore build and runtime files
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+*.runtimeconfig.json
+
+# Logs and debug files
+*.log
+*.trace
+
+# User-specific files
+.vscode/
+*.userprefs
+
+# CSV file

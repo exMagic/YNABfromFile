@@ -11,6 +11,7 @@ using System.Text.RegularExpressions;
 using CsvHelper;
 using CsvHelper.Configuration;
 using HtmlAgilityPack;
+using System.Text.Json.Serialization;
 
 class Program
 {
@@ -265,7 +266,8 @@ class Program
                             // Try to parse the date to YNAB format (ISO date)
                             if (DateTime.TryParse(adjustedDate, out DateTime parsedDate))
                             {
-                                // Create YNAB transaction and add to the list
+                                // Add a timestamp-based suffix to the importId to ensure uniqueness for each import
+                                string uniqueSuffix = DateTime.Now.ToString("yyyyMMddHHmmssfff");
                                 var transaction = new YnabTransaction
                                 {
                                     AccountId = Settings.YnabAccountId,
@@ -274,9 +276,8 @@ class Program
                                     PayeeName = payee,
                                     Memo = memo,
                                     Cleared = "cleared",
-                                    ImportId = $"IMPORT:{parsedDate:yyyy-MM-dd}:{Math.Abs(amount)}:{payee}" // Create a unique import ID
+                                    ImportId = $"IMPORT:{parsedDate:yyyy-MM-dd}:{Math.Abs(amount)}:{payee}:{uniqueSuffix}" // Unique import ID
                                 };
-                                
                                 ynabTransactions.Add(transaction);
                                 parsedTransactionsCount++;
                                 Console.WriteLine($"  Successfully created YNAB transaction object with date {transaction.Date}");
@@ -383,7 +384,7 @@ class Program
         var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
         
         // Send the request to YNAB API
-        string requestUrl = $"{Settings.YnabApiUrl}/budgets/{Settings.YnabBudgetId}/transactions/import";
+        string requestUrl = $"{Settings.YnabApiUrl}/budgets/{Settings.YnabBudgetId}/transactions";
         Console.WriteLine($"Sending request to: {requestUrl}");
         
         var response = await httpClient.PostAsync(requestUrl, content);
@@ -421,9 +422,11 @@ class AppSettings
 // YNAB API models
 class YnabTransaction
 {
+    [JsonPropertyName("account_id")]
     public string AccountId { get; set; }
     public string Date { get; set; }
     public int Amount { get; set; }
+    [JsonPropertyName("payee_name")]
     public string PayeeName { get; set; }
     public string Memo { get; set; }
     public string Cleared { get; set; }
@@ -442,7 +445,10 @@ class YnabApiResponse
 
 class YnabImportResponse
 {
-    public int TransactionsImported { get; set; }
+    [JsonPropertyName("transaction_ids")]
     public List<string> TransactionIds { get; set; } = new List<string>();
+    [JsonPropertyName("duplicate_import_ids")]
     public List<string> DuplicateImportIds { get; set; } = new List<string>();
+    // The /transactions endpoint does not return TransactionsImported, so we calculate it
+    public int TransactionsImported => TransactionIds?.Count ?? 0;
 }

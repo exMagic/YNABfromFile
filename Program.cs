@@ -169,11 +169,6 @@ class Program
         int totalRowsFound = 0;
         int parsedTransactionsCount = 0;
 
-        // Force the target year to be 2024 instead of relying on system clock
-        // This ensures dates from 2025 will be adjusted to 2024
-        int targetYear = 2024;
-        Console.WriteLine($"Target year for date adjustments: {targetYear}");
-
         using (var writer = new StreamWriter(outputFile))
         using (var csvWriter = new CsvWriter(writer, config))
         {
@@ -183,6 +178,7 @@ class Program
             csvWriter.WriteField("Memo");
             csvWriter.WriteField("Outflow");
             csvWriter.WriteField("Inflow");
+            csvWriter.WriteField("Balance");
             csvWriter.NextRecord();
 
             // Extract data from the HTML
@@ -203,80 +199,75 @@ class Program
                             string payee = cells[2].InnerHtml.Trim();
                             string memo = "";
                             string amountText = cells[3].InnerText.Trim().Replace(" ", "").Replace(',', '.');
+                            string balanceText = cells[4].InnerText.Trim().Replace(" ", "").Replace(',', '.');
                             
-                            Console.WriteLine($"Processing row - Date: {originalDate}, Original Payee: {payee}, Amount: {amountText}");
+                            Console.WriteLine($"Processing row - Date: {originalDate}, Original Payee: {payee}, Amount: {amountText}, Balance: {balanceText}");
                             
                             decimal amount = decimal.Parse(amountText, CultureInfo.InvariantCulture);
+                            decimal balance = decimal.Parse(balanceText, CultureInfo.InvariantCulture);
                             decimal outflow = amount < 0 ? Math.Abs(amount) : 0;
                             decimal inflow = amount > 0 ? amount : 0;
 
-                            // Split the payee text on <br> and take the part after the first <br>
+                            // Split the payee text on <br> and parse the parts
                             var payeeParts = payee.Split(new[] { "<br>" }, StringSplitOptions.None);
-                            if (payeeParts.Length > 1)
-                            {
-                                payee = payeeParts[1].Trim();
-                            }
+                            string transactionDate = "";
+                            string payeeName = payeeParts.Length > 1 ? payeeParts[1].Trim() : payee;
 
-                            // Check if payee contains "DATA TRANSAKCJI:" and extract the date
+                            // Extract DATA TRANSAKCJI from any part of the payee text
                             const string transactionDatePrefix = "DATA TRANSAKCJI:";
-                            int transactionDateIndex = payee.IndexOf(transactionDatePrefix, StringComparison.OrdinalIgnoreCase);
-                            if (transactionDateIndex >= 0)
+                            foreach (var part in payeeParts)
                             {
-                                int startIndex = transactionDateIndex + transactionDatePrefix.Length;
-                                string transactionDate = payee.Substring(startIndex).Trim();
-                                originalDate = transactionDate;
-                                Console.WriteLine($"  Found transaction date in payee: {originalDate}");
-                            }
-
-                            // Remove "/" and everything after it from payee
-                            int slashIndex = payee.IndexOf('/');
-                            if (slashIndex >= 0)
-                            {
-                                payee = payee.Substring(0, slashIndex).Trim();
-                            }
-
-                            // Handle future dates by replacing the year with the target year
-                            // Use regex to match date format like 2025-04-24
-                            string adjustedDate = originalDate;
-                            var dateMatch = Regex.Match(originalDate, @"(\d{4})-(\d{2})-(\d{2})");
-                            if (dateMatch.Success)
-                            {
-                                int year = int.Parse(dateMatch.Groups[1].Value);
-                                string month = dateMatch.Groups[2].Value;
-                                string day = dateMatch.Groups[3].Value;
-                                
-                                // Always adjust the year to the target year
-                                if (year != targetYear)
+                                int transactionDateIndex = part.IndexOf(transactionDatePrefix, StringComparison.OrdinalIgnoreCase);
+                                if (transactionDateIndex >= 0)
                                 {
-                                    adjustedDate = $"{targetYear}-{month}-{day}";
-                                    Console.WriteLine($"  Adjusted date {originalDate} to {adjustedDate}");
+                                    int startIndex = transactionDateIndex + transactionDatePrefix.Length;
+                                    transactionDate = part.Substring(startIndex).Trim();
+                                    Console.WriteLine($"  Found transaction date in payee: {transactionDate}");
+                                    break;
                                 }
                             }
 
-                            Console.WriteLine($"  Processed data - Date: {adjustedDate}, Payee: {payee}, Amount: {amount}");
+                            // Use DATA TRANSAKCJI if available, otherwise fall back to the original date
+                            string dateToUse = !string.IsNullOrEmpty(transactionDate) ? transactionDate : originalDate;
+                            Console.WriteLine($"  Using date: {dateToUse}");
+
+                            // Remove "/" and everything after it from payee
+                            int slashIndex = payeeName.IndexOf('/');
+                            if (slashIndex >= 0)
+                            {
+                                payeeName = payeeName.Substring(0, slashIndex).Trim();
+                            }
+
+                            Console.WriteLine($"  Processed data - Date: {dateToUse}, Payee: {payeeName}, Amount: {amount}, Balance: {balance}");
 
                             // Write to CSV
-                            csvWriter.WriteField(adjustedDate);
-                            csvWriter.WriteField(payee);
+                            csvWriter.WriteField(dateToUse);
+                            csvWriter.WriteField(payeeName);
                             csvWriter.WriteField(memo);
                             csvWriter.WriteField(outflow);
                             csvWriter.WriteField(inflow);
+                            csvWriter.WriteField(balance);
                             csvWriter.NextRecord();
                             
                             // Try to parse the date to YNAB format (ISO date)
-                            if (DateTime.TryParse(adjustedDate, out DateTime parsedDate))
+                            if (DateTime.TryParse(dateToUse, out DateTime parsedDate))
                             {
-                                // Add a timestamp-based suffix to the importId to ensure uniqueness for each import
-                                string uniqueSuffix = DateTime.Now.ToString("yyyyMMddHHmmssfff");
+                                // Create a shorter import_id that's under 36 characters
+                                // Format: short prefix + date + amount hash + balance hash + payee hash
+                                string dateStr = parsedDate.ToString("yyyyMMdd");
+                                int amountHash = Math.Abs(amount.GetHashCode() % 100); // Get a 2-digit hash of the amount
+                                int balanceHash = Math.Abs(balance.GetHashCode() % 100); // Get a 2-digit hash of the balance
+                                int payeeHash = Math.Abs(payeeName.GetHashCode() % 1000); // Get a 3-digit hash of the payee
+                                
                                 var transaction = new YnabTransaction
                                 {
                                     AccountId = Settings.YnabAccountId,
                                     Date = parsedDate.ToString("yyyy-MM-dd"),
                                     Amount = (int)(amount * 1000), // YNAB requires amount in milliunits (multiply by 1000)
-                                    PayeeName = payee,
-                                    Memo = memo,
+                                    PayeeName = payeeName,
+                                    Memo = $"Saldo po operacji: {balance}",
                                     Cleared = "cleared",
-                                    ImportId = $"IMPORT:{parsedDate:yyyy-MM-dd}:{Math.Abs(amount)}:{payee}:{uniqueSuffix}" // Unique import ID
+                                    ImportId = $"I:{dateStr}:{amountHash}{balanceHash}{payeeHash}" // Unique ID with payee hash, no timestamp
                                 };
                                 ynabTransactions.Add(transaction);
                                 parsedTransactionsCount++;
@@ -284,7 +275,7 @@ class Program
                             }
                             else
                             {
-                                Console.WriteLine($"  Warning: Could not parse date '{adjustedDate}' for YNAB API");
+                                Console.WriteLine($"  Warning: Could not parse date '{dateToUse}' for YNAB API");
                             }
                         }
                         catch (FormatException ex)
@@ -430,6 +421,7 @@ class YnabTransaction
     public string PayeeName { get; set; }
     public string Memo { get; set; }
     public string Cleared { get; set; }
+    [JsonPropertyName("import_id")]
     public string ImportId { get; set; }
 }
 

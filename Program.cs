@@ -38,6 +38,14 @@ class Program
                 Console.WriteLine($"Created folder: {folderPath}");
             }
 
+            // Create Archives subfolder if it doesn't exist
+            string archivesPath = Path.Combine(folderPath, "Archives");
+            if (!Directory.Exists(archivesPath))
+            {
+                Directory.CreateDirectory(archivesPath);
+                Console.WriteLine($"Created archives folder: {archivesPath}");
+            }
+
             FileSystemWatcher watcher = new FileSystemWatcher(folderPath);
             watcher.Filter = "*.html"; // Monitor only HTML files
             watcher.Created += OnNewFileDetected; // Subscribe to the event for new files
@@ -144,8 +152,14 @@ class Program
                 "modified_" + Path.GetFileNameWithoutExtension(fileName) + ".csv" // Add prefix and change extension
             );
 
-            ProcessHtml(e.FullPath, outputFilePath);
+            bool importSuccess = ProcessHtml(e.FullPath, outputFilePath);
             Console.WriteLine($"Processed file saved as: {outputFilePath}");
+
+            // If import was successful, move files to archives
+            if (importSuccess)
+            {
+                MoveToArchives(e.FullPath, outputFilePath);
+            }
         }
         catch (Exception ex)
         {
@@ -153,7 +167,42 @@ class Program
         }
     }
 
-    private static void ProcessHtml(string inputFile, string outputFile)
+    private static void MoveToArchives(string originalFilePath, string modifiedFilePath)
+    {
+        try
+        {
+            string archivesPath = Path.Combine(Settings.MonitoringFolderPath, "Archives");
+            
+            // Create archive path if it doesn't exist
+            if (!Directory.Exists(archivesPath))
+            {
+                Directory.CreateDirectory(archivesPath);
+                Console.WriteLine($"Created archives folder: {archivesPath}");
+            }
+
+            // Create destination paths for archived files
+            string originalFileName = Path.GetFileName(originalFilePath);
+            string modifiedFileName = Path.GetFileName(modifiedFilePath);
+            
+            // Add timestamp to avoid filename conflicts
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string archivedOriginalPath = Path.Combine(archivesPath, $"{timestamp}_{originalFileName}");
+            string archivedModifiedPath = Path.Combine(archivesPath, $"{timestamp}_{modifiedFileName}");
+
+            // Move files to archives folder
+            File.Move(originalFilePath, archivedOriginalPath, true);
+            File.Move(modifiedFilePath, archivedModifiedPath, true);
+
+            Console.WriteLine($"Moved original file to: {archivedOriginalPath}");
+            Console.WriteLine($"Moved modified file to: {archivedModifiedPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error moving files to archives: {ex.Message}");
+        }
+    }
+
+    private static bool ProcessHtml(string inputFile, string outputFile)
     {
         var config = new CsvConfiguration(CultureInfo.InvariantCulture)
         {
@@ -168,6 +217,7 @@ class Program
         var ynabTransactions = new List<YnabTransaction>();
         int totalRowsFound = 0;
         int parsedTransactionsCount = 0;
+        bool importSuccess = false;
 
         using (var writer = new StreamWriter(outputFile))
         using (var csvWriter = new CsvWriter(writer, config))
@@ -265,7 +315,7 @@ class Program
                                     Date = parsedDate.ToString("yyyy-MM-dd"),
                                     Amount = (int)(amount * 1000), // YNAB requires amount in milliunits (multiply by 1000)
                                     PayeeName = payeeName,
-                                    Memo = $"Saldo po operacji: {balance}",
+                                    Memo = "", // Remove memo content as requested
                                     Cleared = "cleared",
                                     ImportId = $"I:{dateStr}:{amountHash}{balanceHash}{payeeHash}" // Unique ID with payee hash, no timestamp
                                 };
@@ -333,10 +383,13 @@ class Program
                 if (importResult.TransactionIds?.Count > 0)
                 {
                     Console.WriteLine($"Imported transaction IDs: {string.Join(", ", importResult.TransactionIds)}");
+                    importSuccess = true;
                 }
                 if (importResult.DuplicateImportIds?.Count > 0)
                 {
                     Console.WriteLine($"Duplicate transactions found: {importResult.DuplicateImportIds.Count}");
+                    // Still consider this a success since duplicates are expected sometimes
+                    importSuccess = true;
                 }
             }
             catch (Exception ex)
@@ -346,12 +399,16 @@ class Program
                 {
                     Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
                 }
+                importSuccess = false;
             }
         }
         else
         {
             Console.WriteLine("No transactions were created to send to YNAB");
+            importSuccess = false;
         }
+
+        return importSuccess;
     }
     
     private static async Task<YnabImportResponse> SendTransactionsToYnab(List<YnabTransaction> transactions)

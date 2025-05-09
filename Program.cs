@@ -9,6 +9,8 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Linq;
 using CsvHelper;
 using CsvHelper.Configuration;
 using HtmlAgilityPack;
@@ -22,6 +24,22 @@ class Program
     
     // Thread-safe set of files currently being processed
     private static readonly ConcurrentDictionary<string, bool> FilesBeingProcessed = new ConcurrentDictionary<string, bool>();
+
+    // Helper method to generate a deterministic hash that will be consistent across app restarts
+    private static int GetDeterministicHash(string input, int maxValue)
+    {
+        if (string.IsNullOrEmpty(input))
+            return 0;
+        
+        using (var sha = SHA256.Create())
+        {
+            byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(input));
+            // Use the first 4 bytes to create an integer
+            int hash = BitConverter.ToInt32(bytes, 0);
+            // Ensure it's positive and within the desired range
+            return Math.Abs(hash % maxValue);
+        }
+    }
 
     static void Main()
     {
@@ -274,13 +292,27 @@ class Program
             string originalFileName = Path.GetFileName(originalFilePath);
             string modifiedFileName = Path.GetFileName(modifiedFilePath);
             
+            // Create the path to the ImportIds CSV file
+            string importIdsFilePath = Path.Combine(
+                Path.GetDirectoryName(modifiedFilePath),
+                "importids_" + Path.GetFileNameWithoutExtension(originalFilePath) + ".csv"
+            );
+            
             // Define destination paths in the new subfolder with original filenames
             string archivedOriginalPath = Path.Combine(archiveSubfolderPath, originalFileName);
             string archivedModifiedPath = Path.Combine(archiveSubfolderPath, modifiedFileName);
+            string archivedImportIdsPath = Path.Combine(archiveSubfolderPath, Path.GetFileName(importIdsFilePath));
 
             // Move files to archive subfolder
             File.Move(originalFilePath, archivedOriginalPath, true);
             File.Move(modifiedFilePath, archivedModifiedPath, true);
+            
+            // Move ImportIds file if it exists
+            if (File.Exists(importIdsFilePath))
+            {
+                File.Move(importIdsFilePath, archivedImportIdsPath, true);
+                Console.WriteLine($"Moved ImportIds file to: {archivedImportIdsPath}");
+            }
 
             Console.WriteLine($"Moved original file to: {archivedOriginalPath}");
             Console.WriteLine($"Moved modified file to: {archivedModifiedPath}");
@@ -298,7 +330,6 @@ class Program
             Delimiter = ";", // Set the delimiter to semicolon
             BadDataFound = null, // Ignore bad data
         };
-
         var htmlDoc = new HtmlDocument();
         htmlDoc.Load(inputFile);
         
@@ -307,6 +338,12 @@ class Program
         int totalRowsFound = 0;
         int parsedTransactionsCount = 0;
         bool importSuccess = false;
+        
+        // Create a path for the ImportIds CSV file
+        string importIdsFilePath = Path.Combine(
+            Path.GetDirectoryName(outputFile),
+            "importids_" + Path.GetFileNameWithoutExtension(inputFile) + ".csv"
+        );
 
         using (var writer = new StreamWriter(outputFile))
         using (var csvWriter = new CsvWriter(writer, config))
@@ -319,14 +356,12 @@ class Program
             csvWriter.WriteField("Inflow");
             csvWriter.WriteField("Balance");
             csvWriter.NextRecord();
-
             // Extract data from the HTML
             var rows = htmlDoc.DocumentNode.SelectNodes("//table[@border='1']//tr[not(@class='head')]");
             if (rows != null)
             {
                 totalRowsFound = rows.Count;
                 Console.WriteLine($"Found {totalRowsFound} rows in HTML table");
-
                 foreach (var row in rows)
                 {
                     var cells = row.SelectNodes("td");
@@ -394,9 +429,11 @@ class Program
                                 // Create a shorter import_id that's under 36 characters
                                 // Format: short prefix + date + amount hash + balance hash + payee hash
                                 string dateStr = parsedDate.ToString("yyyyMMdd");
-                                int amountHash = Math.Abs(amount.GetHashCode() % 100); // Get a 2-digit hash of the amount
-                                int balanceHash = Math.Abs(balance.GetHashCode() % 100); // Get a 2-digit hash of the balance
-                                int payeeHash = Math.Abs(payeeName.GetHashCode() % 1000); // Get a 3-digit hash of the payee
+                                
+                                // Create deterministic hashes that will be consistent across application restarts
+                                int amountHash = GetDeterministicHash(amount.ToString("F2"), 100);
+                                int balanceHash = GetDeterministicHash(balance.ToString("F2"), 100);
+                                int payeeHash = GetDeterministicHash(payeeName, 1000);
                                 
                                 var transaction = new YnabTransaction
                                 {
@@ -469,6 +506,67 @@ class Program
                 // Call YNAB API to import transactions
                 var importResult = SendTransactionsToYnab(ynabTransactions).GetAwaiter().GetResult();
                 Console.WriteLine($"Successfully sent {importResult.TransactionsImported} transactions to YNAB");
+                
+                // Create the ImportIds CSV file
+                using (var writer = new StreamWriter(importIdsFilePath))
+                using (var csvWriter = new CsvWriter(writer, config))
+                {
+                    // Write the header
+                    csvWriter.WriteField("Date");
+                    csvWriter.WriteField("Payee");
+                    csvWriter.WriteField("Amount");
+                    csvWriter.WriteField("ImportId");
+                    csvWriter.WriteField("YnabTransactionId");
+                    csvWriter.NextRecord();
+                    
+                    // Get transaction IDs from the response if available
+                    var transactionIds = importResult.TransactionIds ?? new List<string>();
+                    var transactions = importResult.Transactions ?? new List<YnabTransactionResponse>();
+                    
+                    // Write transaction details to the ImportIds CSV file
+                    for (int i = 0; i < ynabTransactions.Count; i++)
+                    {
+                        var transaction = ynabTransactions[i];
+                        string transactionId = i < transactionIds.Count ? transactionIds[i] : "N/A";
+                        
+                        // For transactions with response details, we'll use those. Otherwise, use our sent data.
+                        string actualId = transactionId;
+                        if (transactions.Count > 0)
+                        {
+                            // Try to match by import_id
+                            var matchedTransaction = transactions.FirstOrDefault(t => t.ImportId == transaction.ImportId);
+                            if (matchedTransaction != null)
+                            {
+                                actualId = matchedTransaction.Id;
+                            }
+                        }
+                        
+                        csvWriter.WriteField(transaction.Date);
+                        csvWriter.WriteField(transaction.PayeeName);
+                        csvWriter.WriteField(transaction.Amount / 1000.0m); // Convert back from milliunits
+                        csvWriter.WriteField(transaction.ImportId);
+                        csvWriter.WriteField(actualId);
+                        csvWriter.NextRecord();
+                    }
+
+                    // Write any duplicates
+                    foreach (var duplicateId in importResult.DuplicateImportIds ?? new List<string>())
+                    {
+                        var duplicateTransaction = ynabTransactions.FirstOrDefault(t => t.ImportId == duplicateId);
+                        if (duplicateTransaction != null)
+                        {
+                            csvWriter.WriteField(duplicateTransaction.Date);
+                            csvWriter.WriteField(duplicateTransaction.PayeeName);
+                            csvWriter.WriteField(duplicateTransaction.Amount / 1000.0m);
+                            csvWriter.WriteField($"{duplicateTransaction.ImportId} (DUPLICATE)");
+                            csvWriter.WriteField("N/A - DUPLICATE");
+                            csvWriter.NextRecord();
+                        }
+                    }
+                }
+                
+                Console.WriteLine($"Created ImportIds CSV file: {importIdsFilePath}");
+                
                 if (importResult.TransactionIds?.Count > 0)
                 {
                     Console.WriteLine($"Imported transaction IDs: {string.Join(", ", importResult.TransactionIds)}");
@@ -596,6 +694,8 @@ class YnabImportResponse
     public List<string> TransactionIds { get; set; } = new List<string>();
     [JsonPropertyName("duplicate_import_ids")]
     public List<string> DuplicateImportIds { get; set; } = new List<string>();
+    [JsonPropertyName("transactions")]
+    public List<YnabTransactionResponse> Transactions { get; set; } = new List<YnabTransactionResponse>();
     // The /transactions endpoint does not return TransactionsImported, so we calculate it
     public int TransactionsImported => TransactionIds?.Count ?? 0;
 }
@@ -604,4 +704,11 @@ class WatcherState
 {
     public string AccountId { get; set; }
     public string FolderPath { get; set; }
+}
+
+class YnabTransactionResponse
+{
+    public string Id { get; set; }
+    [JsonPropertyName("import_id")]
+    public string ImportId { get; set; }
 }

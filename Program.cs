@@ -22,9 +22,6 @@ class Program
     private static AppSettings Settings { get; set; }
     private static readonly HttpClient httpClient = new HttpClient();
     
-    // Thread-safe set of files currently being processed
-    private static readonly ConcurrentDictionary<string, bool> FilesBeingProcessed = new ConcurrentDictionary<string, bool>();
-
     // Helper method to generate a deterministic hash that will be consistent across app restarts
     private static int GetDeterministicHash(string input, int maxValue)
     {
@@ -117,18 +114,21 @@ class Program
             Console.WriteLine($"Created archives folder: {archivesPath}");
         }
 
-        // Create a file system watcher for this folder
-        FileSystemWatcher watcher = new FileSystemWatcher(folderPath);
-        watcher.Filter = "*.html"; // Monitor only HTML files
+        // Create a file system watcher for this folder only (not subfolders)
+        FileSystemWatcher watcher = new FileSystemWatcher()
+        {
+            Path = folderPath,
+            Filter = "*.html",
+            NotifyFilter = NotifyFilters.FileName,
+            IncludeSubdirectories = false
+        };
         
         // Create a state object to pass to the event handler
         var watcherState = new WatcherState { AccountId = accountId, FolderPath = folderPath };
         
-        // Using the overload that accepts object state
         watcher.Created += (sender, e) => OnNewFileDetected(sender, e, watcherState);
-        watcher.EnableRaisingEvents = true; // Activate listening
+        watcher.EnableRaisingEvents = true;
         
-        // Add to our collection so it doesn't get garbage collected
         watchers.Add(watcher);
         
         Console.WriteLine($"Started monitoring folder: {folderPath} for account: {accountId}");
@@ -215,55 +215,54 @@ class Program
 
     private static void OnNewFileDetected(object sender, FileSystemEventArgs e, WatcherState watcherState)
     {
-        // Ignore files starting with "modified_"
+        // Make absolutely sure we only process files in the root monitoring folder
+        if (Path.GetDirectoryName(e.FullPath) != watcherState.FolderPath)
+        {
+            Console.WriteLine($"Ignored file not in root folder: {e.FullPath}");
+            return;
+        }
+
         string fileName = Path.GetFileName(e.FullPath);
-        if (fileName.StartsWith("modified_"))
+        
+        // Skip if it's not an HTML file or if it's a modified file or lock file
+        if (!fileName.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || 
+            fileName.StartsWith("modified_") || 
+            fileName.EndsWith(".lock"))
         {
             Console.WriteLine($"Ignored file: {e.FullPath}");
             return;
         }
 
-        // Skip if the file is already being processed
-        if (!FilesBeingProcessed.TryAdd(e.FullPath, true))
+        // Ensure the file exists
+        if (!File.Exists(e.FullPath))
         {
-            Console.WriteLine($"File already being processed: {e.FullPath}");
             return;
         }
 
         try
         {
-            Console.WriteLine($"New file detected: {e.FullPath} for account {watcherState.AccountId}");
-
-            // Check if the file exists before processing
-            if (!File.Exists(e.FullPath))
-            {
-                Console.WriteLine($"File no longer exists: {e.FullPath}");
-                return;
-            }
 
             // Generate output path for the modified file
             string outputFilePath = Path.Combine(
-                Path.GetDirectoryName(e.FullPath), // Same path as the input file
-                "modified_" + Path.GetFileNameWithoutExtension(fileName) + ".csv" // Add prefix and change extension
+                Path.GetDirectoryName(e.FullPath) ?? string.Empty,
+                "modified_" + Path.GetFileNameWithoutExtension(fileName) + ".csv"
             );
 
             bool importSuccess = ProcessHtml(e.FullPath, outputFilePath, watcherState.AccountId);
             Console.WriteLine($"Processed file saved as: {outputFilePath}");
 
-            // If import was successful, move files to archives
             if (importSuccess)
             {
                 MoveToArchives(e.FullPath, outputFilePath, watcherState.FolderPath);
             }
         }
+        catch (IOException)
+        {
+            Console.WriteLine($"File is not ready for processing: {e.FullPath}");
+        }
         catch (Exception ex)
         {
             Console.WriteLine($"Error processing file: {ex.Message}");
-        }
-        finally
-        {
-            // Remove the file from our processing list regardless of success or failure
-            FilesBeingProcessed.TryRemove(e.FullPath, out _);
         }
     }
 
@@ -271,55 +270,54 @@ class Program
     {
         try
         {
-            string archivesPath = Path.Combine(folderPath, "Archives");
-            
-            // Create archive path if it doesn't exist
-            if (!Directory.Exists(archivesPath))
+            // First verify all files exist before we start moving anything
+            if (!File.Exists(originalFilePath))
             {
-                Directory.CreateDirectory(archivesPath);
-                Console.WriteLine($"Created archives folder: {archivesPath}");
+                Console.WriteLine($"Original file no longer exists: {originalFilePath}");
+                return;
+            }
+            if (!File.Exists(modifiedFilePath))
+            {
+                Console.WriteLine($"Modified file no longer exists: {modifiedFilePath}");
+                return;
             }
 
-            // Create a unique subfolder using date+time with seconds
+            string archivesPath = Path.Combine(folderPath, "Archives");
+            Directory.CreateDirectory(archivesPath);
+
+            // Create archive subfolder
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string archiveSubfolderPath = Path.Combine(archivesPath, timestamp);
-            
-            // Create the unique subfolder
             Directory.CreateDirectory(archiveSubfolderPath);
-            Console.WriteLine($"Created archive subfolder: {archiveSubfolderPath}");
 
-            // Get original filenames without changing them
-            string originalFileName = Path.GetFileName(originalFilePath);
-            string modifiedFileName = Path.GetFileName(modifiedFilePath);
-            
-            // Create the path to the ImportIds CSV file
-            string importIdsFilePath = Path.Combine(
-                Path.GetDirectoryName(modifiedFilePath),
-                "importids_" + Path.GetFileNameWithoutExtension(originalFilePath) + ".csv"
-            );
-            
-            // Define destination paths in the new subfolder with original filenames
-            string archivedOriginalPath = Path.Combine(archiveSubfolderPath, originalFileName);
-            string archivedModifiedPath = Path.Combine(archiveSubfolderPath, modifiedFileName);
-            string archivedImportIdsPath = Path.Combine(archiveSubfolderPath, Path.GetFileName(importIdsFilePath));
+            // Get paths for all files we need to move
+            string originalTargetPath = Path.Combine(archiveSubfolderPath, Path.GetFileName(originalFilePath));
+            string modifiedTargetPath = Path.Combine(archiveSubfolderPath, Path.GetFileName(modifiedFilePath));
+            string importIdsFileName = "importids_" + Path.GetFileNameWithoutExtension(originalFilePath) + ".csv";
+            string importIdsPath = Path.Combine(Path.GetDirectoryName(modifiedFilePath) ?? string.Empty, importIdsFileName);
+            string importIdsTargetPath = Path.Combine(archiveSubfolderPath, importIdsFileName);
 
-            // Move files to archive subfolder
-            File.Move(originalFilePath, archivedOriginalPath, true);
-            File.Move(modifiedFilePath, archivedModifiedPath, true);
+            // Move all files
+            File.Move(originalFilePath, originalTargetPath, true);
+            File.Move(modifiedFilePath, modifiedTargetPath, true);
             
-            // Move ImportIds file if it exists
-            if (File.Exists(importIdsFilePath))
+            if (File.Exists(importIdsPath))
             {
-                File.Move(importIdsFilePath, archivedImportIdsPath, true);
-                Console.WriteLine($"Moved ImportIds file to: {archivedImportIdsPath}");
+                File.Move(importIdsPath, importIdsTargetPath, true);
             }
 
-            Console.WriteLine($"Moved original file to: {archivedOriginalPath}");
-            Console.WriteLine($"Moved modified file to: {archivedModifiedPath}");
+            // Verify files were moved
+            if (File.Exists(originalFilePath))
+            {
+                throw new Exception("Original file still exists after move");
+            }
+
+            Console.WriteLine($"Moved all files to archive: {archiveSubfolderPath}");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error moving files to archives: {ex.Message}");
+            throw; // Re-throw to ensure the caller knows the operation failed
         }
     }
 

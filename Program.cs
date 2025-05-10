@@ -15,6 +15,7 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using HtmlAgilityPack;
 using System.Text.Json.Serialization;
+using System.Threading;
 
 class Program
 {
@@ -84,14 +85,18 @@ class Program
                 throw new Exception("No valid account configurations found in settings file");
             }
             
-            Console.WriteLine("Press [Enter] to exit.");
-            Console.ReadLine(); // Keep the application running
+            // Keep the application running indefinitely
+            var exitEvent = new ManualResetEvent(false);
+            Console.CancelKeyPress += (sender, eventArgs) => {
+                eventArgs.Cancel = true;
+                exitEvent.Set();
+            };
+            exitEvent.WaitOne();
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error starting application: {ex.Message}");
-            Console.WriteLine("Press [Enter] to exit.");
-            Console.ReadLine();
+            Environment.Exit(1);
         }
     }
 

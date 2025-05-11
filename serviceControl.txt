@@ -1,0 +1,17 @@
+To check if the service is running:
+launchctl list | grep ynabfromfile
+
+# 1. Stop the service
+launchctl bootout gui/$UID ~/Library/LaunchAgents/com.ynabfromfile.plist
+
+# 2. Copy your updated appsettings.json to the bin directory
+cp appsettings.json bin/Debug/net8.0/appsettings.json
+
+# 3. Start the service again
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.ynabfromfile.plist
+
+# View regular output
+tail -f ~/Library/Logs/YNABfromFile.log
+
+# View error output
+tail -f ~/Library/Logs/YNABfromFile.error.log

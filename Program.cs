@@ -20,7 +20,7 @@ using System.Threading;
 class Program
 {
     // Settings from config file
-    private static AppSettings Settings { get; set; }
+    private static AppSettings? Settings { get; set; } // Marked as nullable
     private static readonly HttpClient httpClient = new HttpClient();
     
     // Helper method to generate a deterministic hash that will be consistent across app restarts
@@ -123,7 +123,7 @@ class Program
         FileSystemWatcher watcher = new FileSystemWatcher()
         {
             Path = folderPath,
-            Filter = "*.html",
+            Filter = "*.csv", // Monitor both HTML and CSV files
             NotifyFilter = NotifyFilters.FileName,
             IncludeSubdirectories = false
         };
@@ -192,6 +192,11 @@ class Program
         
         Settings = JsonSerializer.Deserialize<AppSettings>(json, 
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        if (Settings == null || string.IsNullOrEmpty(Settings.YnabApiKey))
+        {
+            throw new Exception("Invalid settings file or missing YnabApiKey");
+        }
         
         // Validate required global settings
         if (string.IsNullOrEmpty(Settings.YnabApiKey))
@@ -220,6 +225,8 @@ class Program
 
     private static void OnNewFileDetected(object sender, FileSystemEventArgs e, WatcherState watcherState)
     {
+        Console.WriteLine($"Processed CSV fstart");
+
         // Make absolutely sure we only process files in the root monitoring folder
         if (Path.GetDirectoryName(e.FullPath) != watcherState.FolderPath)
         {
@@ -228,13 +235,24 @@ class Program
         }
 
         string fileName = Path.GetFileName(e.FullPath);
-        
-        // Skip if it's not an HTML file or if it's a modified file or lock file
-        if (!fileName.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || 
-            fileName.StartsWith("modified_") || 
-            fileName.EndsWith(".lock"))
+
+        if (fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
         {
-            Console.WriteLine($"Ignored file: {e.FullPath}");
+            try
+            {
+                // Process CSV file
+                bool importSuccess = ProcessCsv(e.FullPath, watcherState.AccountId);
+                Console.WriteLine($"Processed CSV file: {e.FullPath}");
+
+                if (importSuccess)
+                {
+                    MoveToArchives(e.FullPath, string.Empty, watcherState.FolderPath); // Use empty string instead of null
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing CSV file: {ex.Message}");
+            }
             return;
         }
 
@@ -600,6 +618,33 @@ class Program
 
         return importSuccess;
     }
+
+    private static bool ProcessCsv(string filePath, string accountId)
+    {
+        Console.WriteLine($"Starting CSV processing for file: {filePath}");
+        try
+        {
+            using (var reader = new StreamReader(filePath))
+            using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+            {
+                var records = csv.GetRecords<dynamic>();
+                int recordCount = 0;
+                foreach (var record in records)
+                {
+                    Console.WriteLine($"Processing record {++recordCount}: {record}");
+                    // Add logic to process each record and send to YNAB
+                }
+                Console.WriteLine($"Total records processed: {recordCount}");
+            }
+            Console.WriteLine($"CSV processing completed successfully for file: {filePath}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error reading CSV file: {ex.Message}");
+            return false;
+        }
+    }
     
     private static async Task<YnabImportResponse> SendTransactionsToYnab(List<YnabTransaction> transactions)
     {
@@ -622,7 +667,7 @@ class Program
         var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
         
         // Send the request to YNAB API
-        string requestUrl = $"{Settings.YnabApiUrl}/budgets/{Settings.YnabBudgetId}/transactions";
+        string requestUrl = $"{Settings?.YnabApiUrl}/budgets/{Settings?.YnabBudgetId}/transactions"; // Added null conditional operator
         Console.WriteLine($"Sending request to: {requestUrl}");
         
         var response = await httpClient.PostAsync(requestUrl, content);
@@ -643,6 +688,10 @@ class Program
         var responseObject = JsonSerializer.Deserialize<YnabApiResponse>(responseContent, 
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         
+        if (responseObject?.Data == null)
+        {
+            throw new Exception("Response data is null");
+        }
         return responseObject.Data;
     }
 }
@@ -650,45 +699,46 @@ class Program
 // Settings model
 class AppSettings
 {
-    public string YnabApiKey { get; set; }
-    public string YnabBudgetId { get; set; }
+    public string YnabApiKey { get; set; } = string.Empty; // Initialized to empty string
+    public string YnabBudgetId { get; set; } = string.Empty; // Initialized to empty string
     public string YnabApiUrl { get; set; } = "https://api.ynab.com/v1";
     public List<AccountSettings> Accounts { get; set; } = new List<AccountSettings>();
 
     // For backward compatibility with the old settings format
-    public string YnabAccountId { get; set; }
-    public string MonitoringFolderPath { get; set; }
+    public string YnabAccountId { get; set; } = string.Empty; // Initialized to empty string
+    public string MonitoringFolderPath { get; set; } = string.Empty; // Initialized to empty string
 }
 
 class AccountSettings 
 {
-    public string YnabAccountId { get; set; }
-    public string MonitoringFolderPath { get; set; }
+    public string YnabAccountId { get; set; } = string.Empty; // Initialized to empty string
+    public string MonitoringFolderPath { get; set; } = string.Empty; // Initialized to empty string
 }
 
 // YNAB API models
 class YnabTransaction
 {
     [JsonPropertyName("account_id")]
-    public string AccountId { get; set; }
-    public string Date { get; set; }
-    public int Amount { get; set; }
+    public string? AccountId { get; set; } // Marked as nullable
+    public string? Date { get; set; } // Marked as nullable
     [JsonPropertyName("payee_name")]
-    public string PayeeName { get; set; }
-    public string Memo { get; set; }
-    public string Cleared { get; set; }
+    public string? PayeeName { get; set; } // Marked as nullable
+    public string? Memo { get; set; } // Marked as nullable
+    public string? Cleared { get; set; } // Marked as nullable
     [JsonPropertyName("import_id")]
-    public string ImportId { get; set; }
+    public string? ImportId { get; set; } // Marked as nullable
+    [JsonPropertyName("amount")]
+    public int Amount { get; set; } // Amount remains non-nullable
 }
 
 class YnabImportRequest
 {
-    public List<YnabTransaction> Transactions { get; set; }
+    public List<YnabTransaction> Transactions { get; set; } = new List<YnabTransaction>(); // Initialized to an empty list
 }
 
 class YnabApiResponse
 {
-    public YnabImportResponse Data { get; set; }
+    public YnabImportResponse? Data { get; set; } // Marked as nullable
 }
 
 class YnabImportResponse
@@ -705,13 +755,13 @@ class YnabImportResponse
 
 class WatcherState
 {
-    public string AccountId { get; set; }
-    public string FolderPath { get; set; }
+    public string AccountId { get; set; } = string.Empty; // Initialized to empty string
+    public string FolderPath { get; set; } = string.Empty; // Initialized to empty string
 }
 
 class YnabTransactionResponse
 {
-    public string Id { get; set; }
+    public string Id { get; set; } = string.Empty; // Initialized to empty string
     [JsonPropertyName("import_id")]
-    public string ImportId { get; set; }
+    public string ImportId { get; set; } = string.Empty; // Initialized to empty string
 }

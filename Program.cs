@@ -119,22 +119,44 @@ class Program
             Console.WriteLine($"Created archives folder: {archivesPath}");
         }
 
-        // Create a file system watcher for this folder only (not subfolders)
-        FileSystemWatcher watcher = new FileSystemWatcher()
+        // Use polling instead of FileSystemWatcher for better Linux compatibility
+        var processedFiles = new HashSet<string>();
+        
+        Task.Run(async () =>
         {
-            Path = folderPath,
-            Filter = "*.html",
-            NotifyFilter = NotifyFilters.FileName,
-            IncludeSubdirectories = false
-        };
-        
-        // Create a state object to pass to the event handler
-        var watcherState = new WatcherState { AccountId = accountId, FolderPath = folderPath };
-        
-        watcher.Created += (sender, e) => OnNewFileDetected(sender, e, watcherState);
-        watcher.EnableRaisingEvents = true;
-        
-        watchers.Add(watcher);
+            Console.WriteLine($"Started polling folder: {folderPath} for account: {accountId}");
+            while (true)
+            {
+                try
+                {
+                    var htmlFiles = Directory.GetFiles(folderPath, "*.html")
+                        .Where(f => !Path.GetFileName(f).StartsWith("modified_"))
+                        .ToList();
+                    
+                    foreach (var file in htmlFiles)
+                    {
+                        if (!processedFiles.Contains(file))
+                        {
+                            Console.WriteLine($"Detected new file: {file}");
+                            processedFiles.Add(file);
+                            
+                            // Wait a bit to ensure file is fully written
+                            await Task.Delay(500);
+                            
+                            var e = new FileSystemEventArgs(WatcherChangeTypes.Created, folderPath, Path.GetFileName(file));
+                            var watcherState = new WatcherState { AccountId = accountId, FolderPath = folderPath };
+                            OnNewFileDetected(null, e, watcherState);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error during polling: {ex.Message}");
+                }
+                
+                await Task.Delay(2000); // Poll every 2 seconds
+            }
+        });
         
         Console.WriteLine($"Started monitoring folder: {folderPath} for account: {accountId}");
     }

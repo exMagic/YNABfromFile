@@ -31,3 +31,4 @@ obj/
 *.userprefs
 
 # CSV file
+publish/linux-x64-single/YNABfromFile
